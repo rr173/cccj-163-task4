@@ -577,6 +577,165 @@ function renderAdvisory() {
   el.innerHTML = items.join("");
 }
 
+// =============================================================== mirror ====
+const MIRROR_STATUS_CN = { pulling: "拉取中", ready: "可切换", active: "已切换",
+  failed: "已失败", rejected: "已拒绝" };
+const MIRROR_BADGE = { pulling: "b-active", ready: "b-proposed",
+  active: "b-published", failed: "b-rejected", rejected: "b-rejected" };
+
+async function loadMirror() {
+  const [ms, ts, ds, ev] = await Promise.all([
+    api("/mirror/manifests"), api("/mirror/tasks"),
+    api("/mirror/devices"), api("/mirror/events?limit=40")]);
+  state.mirror = { manifests: ms.manifests, tasks: ts.tasks,
+                   devices: ds.devices, events: ev.events };
+  renderManifests(); renderDevices(); renderMirrorTasks(); renderMirrorEvents();
+  populateMirrorSource();
+}
+
+function populateMirrorSource() {
+  const sel = $("#mirrorSource");
+  const cur = sel.value;
+  const opts = [`<option value="effective">当前生效版本（${esc(
+    state.status?.current_version || "…")}）</option>`];
+  state.snapshots.forEach(s => opts.push(
+    `<option value="snapshot:${esc(s.snapshot_id)}">行程快照 ${esc(s.snapshot_id)}`
+    + `（${esc(s.vehicle_id)} · ${esc(s.version)}）</option>`));
+  sel.innerHTML = opts.join("");
+  if (cur) sel.value = cur;
+}
+
+function renderManifests() {
+  $("#manifestList").innerHTML = state.mirror.manifests.map(m => `
+    <div class="card">
+      <div class="row1"><span class="id">${esc(m.manifest_id)}</span>
+        <span class="badge b-proposed">不可变</span></div>
+      <div class="note">${esc(m.source.version)} · ${m.objects} 对象 / ${m.chunks} 压缩块</div>
+      <div class="meta">根散列 ${esc(m.root_hash.replace("sha256:", "").slice(0, 20))}…
+        · 设备 ${m.devices.map(esc).join(",")}</div>
+      <div class="meta">来源 ${esc(m.source.kind)}${m.source.ref ? "/" + esc(m.source.ref) : ""}
+        · ${esc(m.note || "无备注")} · ${esc(m.created_at.replace("T", " ").slice(5, 19))}</div>
+    </div>`).join("") || `<div class="hint">暂无清单</div>`;
+}
+
+function mirrorTaskCard(t, withActions) {
+  const p = t.progress;
+  const pct = p.total ? Math.round(100 * p.confirmed / p.total) : 0;
+  const barCls = t.status === "active" || t.status === "ready" ? "done"
+    : t.status === "failed" || t.status === "rejected" ? "bad" : "";
+  const rej = t.rejection ? `<div class="err-item" style="margin-top:6px">
+    <span class="err-code">[${esc(t.rejection.code)}]</span> ${esc(t.rejection.message)}</div>` : "";
+  const res = t.result && t.result.outcome === "switched" ? `<div class="meta">
+    切换结果：${esc(t.result.switched_at)} 原子换指针 → ${esc(t.result.new_image.version)}
+    ${t.result.previous_image ? "（替换 " + esc(t.result.previous_image.version) + "）" : "（首个镜像）"}</div>` : "";
+  const journal = (t.journal || []).slice().reverse().map(e => `
+    <div class="jl"><span class="jt">${esc(e.ts.replace("T", " ").slice(5, 19))}</span>
+      <span class="je">${esc(e.event)}</span><span>${esc(e.detail)}</span></div>`).join("");
+  return `<div class="card" data-tid="${esc(t.task_id)}">
+    <div class="row1"><span class="id">${esc(t.task_id)}</span>
+      <span class="badge ${MIRROR_BADGE[t.status] || "b-draft"}">${
+        esc(MIRROR_STATUS_CN[t.status] || t.status)}</span></div>
+    <div class="note">${esc(t.device_id)} ← ${esc(t.manifest_id)} · ${esc(t.version)}</div>
+    <div class="pbar ${barCls}"><i style="width:${pct}%"></i></div>
+    <div class="meta">已确认 ${p.confirmed}/${p.total} 块（幂等，不重复计数）
+      ${t.staged ? "· 根散列 " + esc(t.staged.root_hash.replace("sha256:", "").slice(0, 16)) + "… 已暂存" : ""}</div>
+    ${rej}${res}
+    ${withActions ? `<div class="actions">
+      ${t.status === "pulling" ? `
+        <button class="ok" data-act="agent">▶ 模拟拉取（续拉）</button>
+        <button class="pub" data-act="agent-drop">⛔ 拉 1 块后断网</button>
+        <button class="danger" data-act="agent-corrupt">🧨 模拟传输损坏</button>` : ""}
+      ${t.status === "ready" ? `<button class="ok" data-act="switch">⇄ 原子换指针</button>` : ""}
+    </div>` : ""}
+    ${journal ? `<details style="margin-top:6px"><summary class="hint">处理记录（${t.journal.length}）</summary>
+      <div class="journal">${journal}</div></details>` : ""}
+  </div>`;
+}
+
+function renderDevices() {
+  $("#deviceList").innerHTML = state.mirror.devices.map(d => {
+    const cur = d.current_image;
+    const img = cur ? `<div class="mirror-img">当前镜像 <span class="v">${esc(cur.version)}</span>
+        <div class="meta">${esc(cur.manifest_id)} · 根散列 ${esc(cur.root_hash.replace("sha256:", "").slice(0, 16))}…
+        · ${esc(cur.switched_at.replace("T", " ").slice(5, 19))} 切换</div></div>`
+      : `<div class="mirror-none">当前镜像：（空，尚未切换过）</div>`;
+    const pend = d.pending_task
+      ? `<div class="hint" style="margin:4px 0">待切换镜像（同一盒子只允许一个）：</div>`
+        + mirrorTaskCard(d.pending_task, true)
+      : `<div class="mirror-none">无待切换镜像</div>`;
+    return `<div class="card" style="cursor:default">
+      <div class="row1"><span class="id">🖥 ${esc(d.device_id)}</span></div>
+      ${img}${pend}
+    </div>`;
+  }).join("") || `<div class="hint">暂无盒子——先发布一份清单</div>`;
+
+  $$("#deviceList [data-act]").forEach(btn => btn.addEventListener("click", async () => {
+    const tid = btn.closest("[data-tid]").dataset.tid;
+    const act = btn.dataset.act;
+    try {
+      if (act === "switch") {
+        const r = await api(`/mirror/tasks/${tid}/switch`, { method: "POST", body: {} });
+        toast(r.switched
+          ? `✓ ${r.device_id} 已原子切换至 ${r.result.new_image.version}` +
+            (r.idempotent ? "（重复操作，返回首次切换结果）" : "")
+          : `✗ 切换未完成：${r.rejection?.message || ""}`, r.switched ? "ok" : "error");
+      } else {
+        const body = act === "agent-drop" ? { stop_after: 1 }
+          : act === "agent-corrupt" ? { corrupt_chunk: 1 } : {};
+        const r = await api(`/mirror/tasks/${tid}/agent`, { method: "POST", body });
+        const bad = r.results.find(x => x.rejection);
+        toast(bad ? `✗ [${bad.rejection.code}] ${bad.rejection.message}`
+          : r.task.status === "ready" ? "✓ 全部对象验真，镜像已暂存、可切换"
+          : `已确认 ${r.task.progress.confirmed}/${r.task.progress.total} 块`,
+          bad ? "error" : "ok");
+      }
+      await loadMirror();
+    } catch (e) { await loadMirror(); showError(e); }
+  }));
+}
+
+function renderMirrorTasks() {
+  $("#mirrorTaskList").innerHTML =
+    state.mirror.tasks.map(t => mirrorTaskCard(t, false)).join("")
+    || `<div class="hint">暂无分发任务</div>`;
+}
+
+function renderMirrorEvents() {
+  $("#mirrorEvents").innerHTML = state.mirror.events.map(e => `
+    <div class="ev"><span class="eid">#${e.event_id}</span>
+      <span class="ts">${esc(e.ts.replace("T", " ").replace("+00:00", "Z"))}</span>
+      <span class="typ">${esc(e.type)}</span><span>${esc(e.summary)}</span></div>`).join("")
+    || `<div class="hint">暂无事件</div>`;
+}
+
+$("#mirrorPublishBtn").addEventListener("click", async () => {
+  const src = $("#mirrorSource").value;
+  const body = {
+    devices: $("#mirrorDevices").value.split(",").map(x => x.trim()).filter(Boolean),
+    note: $("#mirrorNote").value,
+  };
+  if (src.startsWith("snapshot:")) body.source = { kind: "snapshot", snapshot_id: src.slice(9) };
+  try {
+    const r = await api("/mirror/manifests", { method: "POST", body });
+    const m = r.manifest;
+    $("#mirrorPublishResult").innerHTML = `<div class="ok-item">✓ 清单 <b>${esc(m.manifest_id)}</b>
+      （${esc(m.source.version)}，${m.objects.length} 对象 / ${m.chunks.length} 压缩块，
+      根散列 ${esc(m.root_hash.replace("sha256:", "").slice(0, 20))}…）
+      ${r.idempotent ? "<br>重复提交：返回首次清单与首次任务。" : ""}</div>`
+      + r.tasks.map(t => t.rejection
+        ? `<div class="err-item"><span class="err-code">[${esc(t.rejection.code)}]</span>
+           ${esc(t.task_id)} → ${esc(t.device_id)}：${esc(t.rejection.message)}</div>`
+        : `<div class="note-item">${esc(t.task_id)} → ${esc(t.device_id)}：已分发，
+           待拉取 ${t.progress.total} 块</div>`).join("");
+    toast(`✓ 清单 ${m.manifest_id} 已生成` + (r.idempotent ? "（幂等返回首次结果）" : ""), "ok");
+    await loadMirror();
+  } catch (e) {
+    $("#mirrorPublishResult").innerHTML = `<div class="err-item"><span class="err-code">[${
+      esc(e.code || "ERROR")}]</span> ${esc(e.message)}</div>`;
+    showError(e);
+  }
+});
+
 // =============================================================== audit =====
 async function loadAuditImports() {
   const data = await api("/audit/imports");
@@ -893,6 +1052,9 @@ function switchTab(name) {
   }
   if (name === "audit") {
     refreshAudit().catch(showError);
+  }
+  if (name === "mirror") {
+    loadMirror().catch(showError);
   }
 }
 $$(".tab").forEach(t => t.addEventListener("click", () => switchTab(t.dataset.tab)));

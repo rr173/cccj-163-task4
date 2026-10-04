@@ -26,6 +26,17 @@ Endpoints (all JSON under /api):
   GET  /api/rollouts/{id}
   POST /api/rollouts/{id}/promote   /rollback      (one-shot, verdict-once)
 
+Roadside-box map mirror (read-only over live state; own store data/mirror.json):
+  GET  /api/mirror/manifests        POST /api/mirror/manifests
+  GET  /api/mirror/manifests/{id}   POST /api/mirror/manifests/{id}/dispatch
+  GET  /api/mirror/tasks?device=    GET /api/mirror/tasks/{id}
+  GET  /api/mirror/tasks/{id}/chunks/{n}      (device pull: compressed chunk)
+  POST /api/mirror/tasks/{id}/chunks/{n}/ack  (idempotent chunk confirm)
+  POST /api/mirror/tasks/{id}/switch          (atomic pointer flip, verdict-once)
+  POST /api/mirror/tasks/{id}/agent           (device-agent simulator)
+  GET  /api/mirror/devices          GET /api/mirror/devices/{id}
+  GET  /api/mirror/events
+
 Regulatory audit (read-only over live state; appends only to data/audit.json):
   POST /api/audit/template            (read-only signed demo-chain authoring)
   POST /api/audit/vehicle-events      (read-only sign a live vehicle chain)
@@ -51,14 +62,18 @@ from urllib.parse import urlparse, parse_qs
 
 from engine import DomainError, MapEngine, short
 from audit import AuditEngine
+from mirror import MirrorEngine
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "mapstate.json")
 AUDIT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "audit.json")
+MIRROR_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "mirror.json")
 
 ENGINE = MapEngine(DATA_PATH)
 # audit subsystem: separate append-only store; ENGINE is only ever read by it
 AUDIT = AuditEngine(AUDIT_PATH, ENGINE)
+# mirror subsystem: roadside-box image distribution; ENGINE is only ever read
+MIRROR = MirrorEngine(MIRROR_PATH, ENGINE)
 
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -191,6 +206,28 @@ class Handler(BaseHTTPRequestHandler):
                 raise DomainError("BAD_REQUEST", "import_key 必填", 400)
             return self._send_json(AUDIT.create_export(key, body), 201)
 
+        # ---------------- roadside-box map mirror (read-only over live) ------
+        if path == "/api/mirror/manifests":
+            r = MIRROR.create_manifest(body)
+            # identical re-submission replays the first manifest + tasks
+            return self._send_json(r, 200 if r.get("idempotent") else 201)
+        m = re.match(r"^/api/mirror/manifests/([^/]+)/dispatch$", path)
+        if m:
+            return self._send_json(MIRROR.dispatch_manifest(
+                m.group(1), body.get("devices", []),
+                body.get("created_by", "publisher")), 201)
+        m = re.match(r"^/api/mirror/tasks/([^/]+)/chunks/(\d+)/ack$", path)
+        if m:
+            return self._send_json(MIRROR.ack_chunk(
+                m.group(1), int(m.group(2)), body.get("hash", "")))
+        m = re.match(r"^/api/mirror/tasks/([^/]+)/switch$", path)
+        if m:
+            return self._send_json(MIRROR.switch_task(m.group(1)))
+        m = re.match(r"^/api/mirror/tasks/([^/]+)/agent$", path)
+        if m:
+            return self._send_json(MIRROR.run_agent(
+                m.group(1), body.get("stop_after"), body.get("corrupt_chunk")))
+
         table = {
             "/api/candidates": lambda: self._send_json(ENGINE.list_candidates()),
             "/api/patches": lambda: self._send_json(ENGINE.create_patch(body)),
@@ -245,6 +282,31 @@ class Handler(BaseHTTPRequestHandler):
             ts = q.get("ts", [None])[0]
             return self._send_json(AUDIT.query_state(
                 m.group(1), int(seq) if seq is not None else None, ts), 201)
+
+        # -------- roadside-box map mirror (same store the device CLI reads) --
+        if path == "/api/mirror/manifests":
+            return self._send_json({"manifests": MIRROR.list_manifests()})
+        m = re.match(r"^/api/mirror/manifests/([^/]+)$", path)
+        if m:
+            return self._send_json(MIRROR.get_manifest(m.group(1)))
+        if path == "/api/mirror/tasks":
+            return self._send_json({"tasks": MIRROR.list_tasks(
+                q.get("device", [None])[0])})
+        m = re.match(r"^/api/mirror/tasks/([^/]+)/chunks/(\d+)$", path)
+        if m:
+            return self._send_json(MIRROR.get_chunk_payload(
+                m.group(1), int(m.group(2))))
+        m = re.match(r"^/api/mirror/tasks/([^/]+)$", path)
+        if m:
+            return self._send_json(MIRROR.get_task(m.group(1)))
+        if path == "/api/mirror/devices":
+            return self._send_json({"devices": MIRROR.list_devices()})
+        m = re.match(r"^/api/mirror/devices/([^/]+)$", path)
+        if m:
+            return self._send_json(MIRROR.get_device(m.group(1)))
+        if path == "/api/mirror/events":
+            return self._send_json({"events": MIRROR.list_events(
+                int(q.get("limit", ["80"])[0]))})
 
         table = {
             "/api/status": lambda: self._send_json(ENGINE.region_status()),

@@ -1,7 +1,9 @@
 # 高精地图瓦片 · 分区发布与车辆路线快照服务
 
 零第三方依赖（Python 3.11 标准库 + 原生 HTML/JS），实现"地图编辑 → 接缝/跨区路线验证
-→ 按区域代际发布 → 车辆路线快照固定 → 紧急补丁安全过渡 → 离线追赶"的完整闭环。
+→ 按区域代际发布 → 车辆路线快照固定 → 紧急补丁安全过渡 → 离线追赶"的完整闭环，
+并附带两个物理隔离的子系统：**监管时序审计**（只读线上）与
+**路侧计算盒地图镜像仓库**（不可变清单 → 压缩块拉取 → 验真暂存 → 原子换指针）。
 
 ## 启动
 
@@ -11,8 +13,9 @@ python3 server.py 8080          # 打开 http://localhost:8080
 
 首次启动会自动生成演示世界并落盘到 `data/mapstate.json`（原子写）。
 首次使用审计功能会自动创建独立的 `data/audit.json`（append-only）。
-删除 `data/` 即可重置。命令行工具 `route_replay.py` / `audit_cli.py`
-直接读写各自存储，无需开服务（`audit_cli.py` 对线上存储只读）。
+首次使用镜像分发会自动创建独立的 `data/mirror.json`（原子写）。
+删除 `data/` 即可重置。命令行工具 `route_replay.py` / `audit_cli.py` / `mirror_cli.py`
+直接读写各自存储，无需开服务（`audit_cli.py` 与 `mirror_cli.py` 对线上存储只读）。
 
 ## 领域模型与不变量
 
@@ -26,6 +29,9 @@ python3 server.py 8080          # 打开 http://localhost:8080
 | 补丁 `patch` | **纯规则叠加**（只能封闭既有车道），固化基础版本瓦片哈希；不含几何/拓扑增删 |
 | 快照 `snapshot` | 车辆取路线时固定"版本描述符 + 瓦片哈希集合 + 逐边路径"，永不被后续发布/补丁改写 |
 | 试运行批次 `rollout` | 从**校验通过**的候选创建：作用区域 + 车辆名单 + 观察窗口；名单内新行程用待晋级内容，名单外读当前内容 |
+| 清单 `manifest` | 发布人员选定**已生效快照**（当前生效版本或已固定行程快照）+ 设备集合生成的**不可变**分发清单；对象（版本描述符 + 瓦片）打包为 zlib 压缩块，逐块 sha256、整包根散列；内容寻址，重试生成返回首次清单 |
+| 镜像任务 `task` | 清单 × 盒子的分发任务：`pulling 拉取中 → ready 可切换 → active 已切换`，或 `failed / rejected`；判定一次终身，重试返回首次结果 |
+| 路侧盒 `device` | 计算盒：`current_image`（当前镜像指针）+ 至多一个待切换任务；只在全部对象验真后原子换指针 |
 
 **接缝校验**（候选发布闸门）：端口相互声明、全局坐标重合、限速/车道数 profile 一致、
 无孤立端口，外加区域瓦片完整性（必须重述本区全部瓦片）与全部跨区验收走廊可贯通。
@@ -49,6 +55,18 @@ python3 server.py 8080          # 打开 http://localhost:8080
 晋级/撤回一次性生效，重复调用返回首次结果（`idempotent:true`），反向操作→409。
 撤回只停止新的分流：已发出的行程快照与区域代际原样保留。批次与统计随
 `mapstate.json` 原子落盘，重启后完整恢复。
+
+**镜像分发**（路侧计算盒）：清单内容寻址、生成即不可变；设备代理逐块校验
+`sha256(压缩块)`，最后一块确认时复核**整包根散列**才把镜像标记为"可切换"（暂存）。
+断网续拉从已确认块之后继续，**已确认块不重复计数**（确认幂等）。同一盒子只允许一个
+待切换镜像（`MIRROR_PENDING_CONFLICT`）；清单任一代次落后于当前镜像、或版本相同、
+或同代次的更早发布，都被拒绝（`MIRROR_STALE_GENERATION`）；仓库对象损坏
+（`MIRROR_OBJECT_CORRUPT`）或根散列不符（`MIRROR_ROOT_HASH_MISMATCH`）则任务失败——
+以上任何失败都**不触碰盒子当前镜像**。切换即一次原子提交内的换指针（镜像 + 任务状态 +
+处理记录同生共死），切换前任务保持原状态。任务状态、逐次处理记录（journal）与切换结果
+全部落盘 `data/mirror.json`，重启后拉取中/可切换/已切换/失败/拒绝均可辨别。
+网页与 `mirror_cli.py` 读写同一存储，进度与拒绝理由完全一致；镜像子系统只读线上，
+绝不改动地图中心状态与已创建行程快照。
 
 ## API（均为 JSON，前缀 `/api`）
 
@@ -74,6 +92,27 @@ python3 server.py 8080          # 打开 http://localhost:8080
 | GET/POST | `/rollouts` | 批次清单（含分组统计/阈值判定）· 创建批次 `{candidate_id, regions, vehicles, window?, thresholds?}` |
 | GET | `/rollouts/{id}` | 批次详情（各组请求量/不可达/安全过渡拒绝） |
 | POST | `/rollouts/{id}/promote` · `/rollback` | 按阈值一次性晋级（原子发布）· 撤回；重复调用返回首次结果 |
+
+### 路侧盒镜像 API（只读线上；只写独立的 `data/mirror.json`）
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| GET/POST | `/mirror/manifests` | 清单列表 · 生成不可变清单并分发 `{devices, note?, source?}`（相同内容幂等返回首次清单与任务） |
+| GET | `/mirror/manifests/{id}` · POST `/mirror/manifests/{id}/dispatch` | 清单详情 · 追加分发到更多盒子（逐盒判定一次终身） |
+| GET | `/mirror/tasks?device=` · `/mirror/tasks/{id}` | 任务进度/拒绝理由/处理记录（与设备 CLI 同一数据源） |
+| GET | `/mirror/tasks/{id}/chunks/{n}` | 设备拉取压缩对象块（zlib，含声明散列） |
+| POST | `/mirror/tasks/{id}/chunks/{n}/ack` | 按设备算得的散列确认块（幂等，不重复计数；坏散列记录拒绝理由） |
+| POST | `/mirror/tasks/{id}/switch` | 全部对象验真后原子换指针（重复调用返回首次切换结果） |
+| POST | `/mirror/tasks/{id}/agent` | 设备代理模拟 `{stop_after?, corrupt_chunk?}`：断网续拉/传输损坏演示 |
+| GET | `/mirror/devices` · `/mirror/devices/{id}` · `/mirror/events` | 盒子当前镜像与待切换任务 · 镜像仓库事件流 |
+
+**拒绝码**：`MIRROR_PENDING_CONFLICT`（盒子已有待切换镜像）、
+`MIRROR_STALE_GENERATION`（较老代次/同版本/同代次更早发布）、
+`MIRROR_CHUNK_HASH_MISMATCH`（块散列不符，可重试）、
+`MIRROR_OBJECT_CORRUPT`（仓库对象损坏，任务失败）、
+`MIRROR_ROOT_HASH_MISMATCH`（整包根散列不符）、
+`MIRROR_NOT_READY`（未验真完毕禁止切换）、`MIRROR_TASK_CLOSED`（任务已终结）、
+`MIRROR_CHUNK_UNKNOWN`（块不存在）、`MIRROR_SOURCE_NOT_FOUND`（来源快照不存在）。
 
 ### 监管审计 API（只读线上；只写独立的 `data/audit.json`）
 
@@ -112,6 +151,9 @@ python3 server.py 8080          # 打开 http://localhost:8080
 - **🧪 分组试运行**：从校验通过的候选创建批次（作用区域/对象名单/观察窗口/阈值），
   实时监控各组请求量、不可达次数与安全过渡拒绝；阈值越界禁止晋级，
   一键晋级（原子发布）或撤回（不动快照与代际），重复操作返回首次结果。
+- **📦 镜像分发**：选定已生效快照（当前版本/行程快照）+ 设备集合生成不可变清单；
+  盒子卡片实时显示当前镜像与待切换任务进度条，一键模拟拉取/断网/传输损坏、
+  原子换指针；拒绝理由与处理记录和设备 CLI 同源。
 - **⚖ 时序审计**（只读）：导入带序号/来源/摘要校验的车辆运行事件；在地图上重建
   指定事件序号（或时刻）的空间状态——版本描述、瓦片摘要、行驶步骤、当前位置；
   从已确认检查点一键隔离演算"版本切换"或"撤销道路管制"；导出审计证据包。
@@ -138,6 +180,24 @@ python3 server.py 8080          # 打开 http://localhost:8080
 ./route_replay.py rollout-promote RO-0001     # 一次性晋级（原子发布；重复→首次结果）
 ./route_replay.py rollout-rollback RO-0001 "指标越界"   # 撤回（不动快照与代际）
 ```
+
+## 镜像分发 CLI：mirror_cli.py（设备代理/发布，只读线上）
+
+```bash
+./mirror_cli.py publish RSU-01,RSU-02 "晚高峰推送"   # 生成不可变清单并分发（重试→首次结果）
+./mirror_cli.py publish RSU-03 --snapshot S-0001     # 从已固定行程快照生成清单
+./mirror_cli.py dispatch MF-0001 RSU-04              # 既有清单追加分发（逐盒判定一次）
+./mirror_cli.py manifests · tasks [RSU-01] · show MT-0001
+./mirror_cli.py pull MT-0001                          # 设备代理：拉块-校验-确认（断点续拉）
+./mirror_cli.py pull MT-0001 --stop-after 1           # 模拟拉 1 块后断网
+./mirror_cli.py pull MT-0001 --corrupt 1              # 模拟第 1 块传输损坏
+./mirror_cli.py switch MT-0001                        # 原子换指针（重复→首次切换结果）
+./mirror_cli.py devices · device RSU-01 · events
+```
+
+一键镜像演示：`bash demo_mirror.sh`（重置存储后走完整竞争/断网/损坏/切换流程）。
+自动化校验：`python3 test_mirror.py`（不可变清单/逐块与根散列验真/断网续拉幂等/
+单待切换镜像/较老代次与坏对象拒绝/原子换指针/重启恢复/同源隔离）。
 
 ## 监管审计 CLI：audit_cli.py（只读线上）
 
@@ -179,16 +239,32 @@ python3 server.py 8080          # 打开 http://localhost:8080
 engine.py          领域引擎：拓扑图/Dijkstra、校验、发布、补丁、快照、试运行批次、原子持久化
 server.py          标准库 HTTP API + 静态文件
 route_replay.py    路线复现/生命周期/试运行 CLI
+mirror.py          路侧盒镜像引擎：不可变清单/压缩块/验真暂存/原子换指针（只读线上）
+mirror_cli.py      镜像分发 CLI（发布 + 设备代理拉取/确认/切换）
 audit.py           监管审计引擎：证据链导入/时序重建/检查点/隔离分支/导出（只读线上）
 audit_cli.py       审计 CLI（导入/查询/检查点/分支/导出）
+test_mirror.py     镜像仓库端到端校验（验真/续拉/竞争/原子切换/重启/隔离）
 test_audit.py      审计需求端到端校验（可重复运行）
 test_rollout.py    分组试运行端到端校验（分流/统计/冲突/幂等/原子性/重启恢复）
+demo_mirror.sh     镜像分发一键演示
 demo_audit.sh      审计功能一键演示
 demo_rollout.sh    分组试运行一键演示
-static/            审查页（index.html / app.js / styles.css，含 🧪 分组试运行 与 ⚖ 时序审计 标签页）
-data/mapstate.json 线上单一事实源（原子落盘；审计从不写入）
+static/            审查页（index.html / app.js / styles.css，含 🧪 分组试运行、📦 镜像分发 与 ⚖ 时序审计 标签页）
+data/mapstate.json 线上单一事实源（原子落盘；审计与镜像从不写入）
 data/audit.json    审计 append-only 存储（imports/checkpoints/branches/exports/archives）
+data/mirror.json   镜像仓库存储（manifests/chunk_store/tasks/devices/events）
 ```
+
+## 镜像子系统的隔离不变量
+
+- **物理分离**：镜像状态全部在独立的 `data/mirror.json`；`mirror.py` 只以深拷贝方式
+  读取线上 `MapEngine.state`（持锁快照），清单生成后线上任何演进都不影响已生成清单。
+- **清单不可变**：清单内容（来源版本/对象/压缩块/根散列/设备集合）整体做内容寻址；
+  相同内容重复提交永远返回首次清单与首次任务（响应带 `idempotent:true`）。
+- **判定一次终身**：任务按 `(清单散列, 设备)` 幂等；接受/拒绝、切换成功/失败都是
+  首次判定永久有效，重试同一清单返回第一次任务和切换结果。
+- **验真才暂存、验真才切换**：逐块 `sha256` + 整包根散列复核通过才进入"可切换"；
+  切换动作在同一原子提交内再次全量验真并换指针，任何一步失败盒子保持原镜像。
 
 ## 审计子系统的隔离不变量
 
