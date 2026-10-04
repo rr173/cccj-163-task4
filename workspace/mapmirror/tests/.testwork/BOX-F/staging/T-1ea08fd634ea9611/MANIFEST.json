@@ -1,0 +1,58 @@
+{
+  "block_size": 4096,
+  "blocks": [
+    {
+      "index": 0,
+      "objects": [
+        "snapshot/S-0001",
+        "tile/A00",
+        "tile/A01"
+      ],
+      "sha256": "sha256:8a0c70063d6dc166cbe4ebecb1a7b7eb5e641b71da3faf3d4d0b1f08d78f77a2",
+      "size": 1033
+    },
+    {
+      "index": 1,
+      "objects": [
+        "tile/B01"
+      ],
+      "sha256": "sha256:b5174c72f49bd9936579571135b7ecb484cda6e5792570e831429b300d8310bf",
+      "size": 395
+    }
+  ],
+  "center_anchor": "sha256:ae1000809228685950eea48631559473687d8bcc0e3d559b3cfaf2d2c4e56f8e",
+  "devices": [
+    "BOX-F"
+  ],
+  "format": "mapmirror-manifest/1",
+  "manifest_id": "MF-c66f0782ecaa0c4f",
+  "note": "",
+  "objects": [
+    {
+      "oid": "snapshot/S-0001",
+      "sha256": "sha256:ae1000809228685950eea48631559473687d8bcc0e3d559b3cfaf2d2c4e56f8e",
+      "size": 1629,
+      "type": "snapshot"
+    },
+    {
+      "oid": "tile/A00",
+      "sha256": "sha256:d3204f766864b6607a2c330342b9801c50454c74f1b90f23b4b5ec8afac2f45b",
+      "size": 938,
+      "type": "tile"
+    },
+    {
+      "oid": "tile/A01",
+      "sha256": "sha256:406900a37cc808cc39ce1df6c60d27c5bf581bf6a10f5e56f1ee3a818c079372",
+      "size": 947,
+      "type": "tile"
+    },
+    {
+      "oid": "tile/B01",
+      "sha256": "sha256:01deaf5cf81d30d695d7e0725869c41eee2ec396aed50ef3c700dd4f7b9fbd5f",
+      "size": 956,
+      "type": "tile"
+    }
+  ],
+  "root_sha256": "sha256:f0d4cb5fb57ddaffe24aea284cffb8134b0f5835515320fc5269fa4570982ddb",
+  "snapshot_id": "S-0001"
+}

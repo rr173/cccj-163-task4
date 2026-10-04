@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>路侧地图镜像仓库</title>
+<style>
+  :root { --bg:#0f1420; --panel:#171e2e; --line:#27304a; --fg:#e6ecf8;
+          --muted:#8a96b0; --acc:#4da3ff; --ok:#37c97a; --warn:#f0b429;
+          --bad:#ff5d6c; --purple:#a78bfa; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC",
+         "Microsoft YaHei",sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:16px 22px; border-bottom:1px solid var(--line);
+           display:flex; align-items:center; gap:14px; }
+  header h1 { font-size:17px; margin:0; }
+  header .sub { color:var(--muted); font-size:12px; }
+  main { padding:18px 22px; display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .panel { background:var(--panel); border:1px solid var(--line);
+           border-radius:10px; padding:14px 16px; min-width:0; }
+  .panel h2 { margin:0 0 10px; font-size:13px; color:var(--muted);
+              text-transform:uppercase; letter-spacing:.08em; }
+  .full { grid-column:1 / -1; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line);
+          vertical-align:top; }
+  th { color:var(--muted); font-weight:600; }
+  tr.task { cursor:pointer; }
+  tr.task:hover { background:#1c2537; }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+          font-size:12px; }
+  .badge { display:inline-block; padding:1px 8px; border-radius:999px;
+           font-size:11px; border:1px solid var(--line); white-space:nowrap; }
+  .NEW{color:var(--muted)} .PULLING{color:var(--acc);border-color:var(--acc)}
+  .PULLED{color:var(--purple)} .STAGED{color:var(--warn);border-color:var(--warn)}
+  .SWITCHED{color:var(--ok);border-color:var(--ok)}
+  .REJECTED,.FAILED{color:var(--bad);border-color:var(--bad)}
+  .bar { height:6px; background:#0c101b; border-radius:3px; overflow:hidden;
+         width:120px; display:inline-block; vertical-align:middle; }
+  .bar > i { display:block; height:100%; background:var(--acc); }
+  .reason { color:var(--bad); font-size:12px; }
+  .muted { color:var(--muted); }
+  code { background:#0c101b; padding:1px 5px; border-radius:4px; }
+  pre { background:#0c101b; border:1px solid var(--line); border-radius:8px;
+        padding:10px; overflow:auto; max-height:300px; font-size:11.5px; }
+  .device { border:1px solid var(--line); border-radius:8px; padding:10px 12px;
+            margin-bottom:10px; }
+  .device .row { display:flex; gap:12px; flex-wrap:wrap; font-size:12.5px; }
+  .chip { background:#0c101b; border:1px solid var(--line); border-radius:6px;
+          padding:2px 8px; }
+  #spin { color:var(--muted); font-size:12px; }
+  .ev { padding:4px 0; border-bottom:1px dashed var(--line); font-size:12px; }
+  .ev .t { color:var(--muted); margin-right:8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🛰️ 路侧地图镜像仓库</h1>
+  <span class="sub">不可变清单 · 块验真 · 断点续传 · 原子换指针 ——
+    网页与设备 CLI 同一数据源（<code>/api</code>）</span>
+  <span style="flex:1"></span>
+  <label class="sub">仓库地址 <input id="base" size="22"
+    value=""></label>
+  <span id="spin"></span>
+</header>
+<main>
+  <section class="panel full">
+    <h2>路侧盒子（当前镜像 / 待切换槽 / 各代次任务）</h2>
+    <div id="devices"></div>
+  </section>
+  <section class="panel">
+    <h2>清单</h2>
+    <table>
+      <thead><tr><th>manifest</th><th>中心快照</th><th>根散列</th><th>发布时间</th>
+      <th>备注</th></tr></thead>
+      <tbody id="manifests"></tbody>
+    </table>
+  </section>
+  <section class="panel">
+    <h2>任务进度（点击行查看每次处理结果与拒绝理由）</h2>
+    <table>
+      <thead><tr><th>设备</th><th>代次</th><th>清单</th><th>状态</th>
+      <th>块进度</th><th>尝试</th><th>拒绝/失败理由</th></tr></thead>
+      <tbody id="tasks"></tbody>
+    </table>
+  </section>
+  <section class="panel full" id="detail-panel" style="display:none">
+    <h2>任务详情 · <span id="detail-id" class="mono"></span></h2>
+    <div id="detail-summary"></div>
+    <h2 style="margin-top:12px">每次处理结果（事件流，append-only）</h2>
+    <div id="events"></div>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
